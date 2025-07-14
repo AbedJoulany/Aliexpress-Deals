@@ -8,6 +8,8 @@ from cache_manager import CacheManager
 from aliexpress_client import AliExpressClient
 from url_processor import URLProcessor
 from telegram_bot import TelegramBot
+import threading # Used to run the Flask app in a separate thread
+
 
 # --- Basic Logging Setup ---
 logging.basicConfig(
