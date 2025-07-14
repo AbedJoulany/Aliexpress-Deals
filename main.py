@@ -9,6 +9,7 @@ from aliexpress_client import AliExpressClient
 from url_processor import URLProcessor
 from telegram_bot import TelegramBot
 import threading # Used to run the Flask app in a separate thread
+from keep_alive import run_keep_alive_server # Import the function from your new file
 
 
 # --- Basic Logging Setup ---
