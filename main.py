@@ -61,6 +61,10 @@ def main() -> None:
                                    url_processor=url_processor,
                                    cache_manager=cache_manager,
                                    executor=executor)
+        keep_alive_thread = threading.Thread(target=run_keep_alive_server, daemon=True)
+        keep_alive_thread.start()
+        logger.info("Keep-alive server thread started.")
+        
         telegram_bot.run()
     except Exception as e:
         logger.critical(
