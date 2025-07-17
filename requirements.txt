@@ -4,3 +4,4 @@ aiohttp
 requests 
 beautifulsoup4
 flask
+telegram

@@ -18,6 +18,16 @@ from aliexpress_utils import get_product_details_by_id  # Added this import as i
 logger = logging.getLogger(__name__)
 # رمز RTL لإجبار النص على الاتجاه من اليمين لليسار
 rtl_mark = "\u200F"
+ARABIC_CURRENCY_NAMES = {
+    "USD": "دولار أمريكي",
+    "SAR": "ريال سعودي",
+    "AED": "درهم إماراتي",
+    "EGP": "جنيه مصري",
+    "EUR": "يورو",
+    "GBP": "جنيه إسترليني",
+    "CNY": "يوان صيني",
+    "ILS": "شيكل إسرائيلي",
+}
 
 
 class TelegramBot:
@@ -73,8 +83,7 @@ class TelegramBot:
             "🔍 <b>كيفية استخدام البوت:</b>\n"
             "1️⃣ انسخ رابط منتج من موقع AliExpress 📋\n"
             "2️⃣ أرسل الرابط إلى هذا البوت 📤\n"
-            "3️⃣ سيقوم البوت تلقائيًا بإنشاء روابط أفلييت لك ✨\n"
-            "4️⃣ استخدم الروابط لمشاركتها وكسب الأرباح 💰\n\n"
+            "3️⃣ سيقوم البوت تلقائيًا بإنشاء روابط الخصم ✨\n"
             "🔗 <b>أنواع الروابط المدعومة:</b>\n"
             "• روابط المنتجات العادية من AliExpress 🌐\n"
             "• روابط AliExpress المختصرة 🔄\n\n"
@@ -86,7 +95,7 @@ class TelegramBot:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=
-            "Please send an AliExpress product link to generate affiliate links."
+            "📭 الرجاء إرسال رابط منتج من موقع AliExpress حتى نتمكن من إنشاء روابط الخصم 💡"
         )
 
     async def _fetch_product_info(self, product_id: str):
@@ -170,8 +179,10 @@ class TelegramBot:
         message_lines = []
         message_lines.append(f"<b>{rtl_mark}{product_title[:250]}</b>")
 
+        arabic_currency = ARABIC_CURRENCY_NAMES.get(product_currency, product_currency)
+
         if details_source == "API" and product_price:
-            price_str = f"{product_price} {product_currency}".strip()
+            price_str = f"{product_price} {arabic_currency}".strip()
             message_lines.append(f"\n<b>السعر بعد الخصم:</b> {price_str}\n")
         elif details_source == "Scraped":
             message_lines.append("\n<b>السعر بعد الخصم:</b> غير متوفر\n")
@@ -189,7 +200,7 @@ class TelegramBot:
             else:
                 message_lines.append(f"{offer_name}: ❌ فشل في الإنشاء")
 
-        #message_lines.append("\n<i>تم الإنشاء بواسطة RizoZ</i>")
+        message_lines.append("\n<i>تم الإنشاء بواسطة P4uDeals</i>")
         return "\n".join(message_lines)
 
     def _create_inline_keyboard(self):
@@ -232,7 +243,8 @@ class TelegramBot:
             # Fallback to sending text-only message if photo fails
             await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=f"⚠️ Error sending message. Offers:\n\n{response_text}",
+                text=
+                f"⚠️ حدث خطأ أثناء إرسال الرسالة. إليك العروض المتوفرة:\n\n{response_text}",
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
                 reply_markup=reply_markup)
@@ -316,7 +328,6 @@ class TelegramBot:
             # Step 4: Format Response Message
             response_text = self._format_response_message(
                 product_info, generated_links)
-
             # Step 5: Create Inline Keyboard
             reply_markup = self._create_inline_keyboard()
 
@@ -328,7 +339,7 @@ class TelegramBot:
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=
-                    f"<b>{product_title[:250]}</b>\n\nWe couldn't find an offer for this product.",
+                    f"<b>{product_title[:250]}</b>\n\nلم نتمكن من العثور على عروض لهذا المنتج حاليًا ❌",
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                     reply_markup=reply_markup)
@@ -341,7 +352,7 @@ class TelegramBot:
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=
-                    f"An unexpected error occurred while processing product ID {product_id}. Sorry!"
+                    f"حدث خطأ غير متوقع أثناء معالجة المنتج برقم {product_id}. نأسف على ذلك 😢"
                 )
             except Exception:
                 logger.error(
@@ -374,7 +385,7 @@ class TelegramBot:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=
-                "❌ No AliExpress links found in your message. Please send a valid AliExpress product link."
+                "❌ لم يتم العثور على أي روابط AliExpress في رسالتك. الرجاء إرسال رابط منتج صحيح 🔗"
             )
             return []  # Return empty list if no URLs are found
 
@@ -488,7 +499,7 @@ class TelegramBot:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=
-                "❌ We couldn't find any valid AliExpress product links in your message ❌"
+                "❌ لم نتمكن من العثور على أي روابط منتجات صالحة من AliExpress في هذه الرسالة ❌"
             )
             await self._delete_loading_animation(chat_id,
                                                  loading_animation.message_id)
@@ -498,7 +509,7 @@ class TelegramBot:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=
-                f"⏳ Processing {len(tasks)} AliExpress products from your message. Please wait..."
+                f"⏳ جاري معالجة {len(tasks)} منتج من AliExpress من رسالتك. الرجاء الانتظار..."
             )
 
         logger.info(
@@ -512,20 +523,22 @@ class TelegramBot:
 
     def run(self):
         """Starts the Telegram bot polling."""
-        logger.info("Starting Telegram bot polling...")
+        logger.info("✅ تم تشغيل البوت ويستعد لاستقبال روابط AliExpress...")
         logger.info(
-            f"Using AliExpress Key: {self.aliexpress_client.app_key[:4]}...")
-        logger.info(f"Using Tracking ID: {self.aliexpress_client.tracking_id}")
-        logger.info(
-            f"Product Detail Settings: Currency={self.aliexpress_client.target_currency}, Lang={self.aliexpress_client.target_language}, Country={self.aliexpress_client.query_country}"
+            f"🔑 مفتاح التطبيق المستخدم: {self.aliexpress_client.app_key[:4]}..."
         )
-        logger.info(f"Query Fields: {self.aliexpress_client.QUERY_FIELDS}")
+        logger.info(f"🆔 رقم التتبع: {self.aliexpress_client.tracking_id}")
         logger.info(
-            f"Cache expiry set to {self.cache_manager.cache_expiry_seconds / (24 * 60 * 60)} days"
+            f"📦 إعدادات تفاصيل المنتج: العملة={self.aliexpress_client.target_currency}, اللغة={self.aliexpress_client.target_language}, الدولة={self.aliexpress_client.query_country}"
+        )
+        logger.info(
+            f"📝 الحقول المطلوبة: {self.aliexpress_client.QUERY_FIELDS}")
+        logger.info(
+            f"🧠 مدة صلاحية التخزين المؤقت: {self.cache_manager.cache_expiry_seconds / (24 * 60 * 60)} يوم"
         )
         offer_names = [o.label for o in OFFER_PARAMS.values()]
         logger.info(
-            f"Will generate links for offers: {', '.join(offer_names)}")
-        logger.info("Bot is ready and listening for AliExpress links...")
+            f"🎯 سيتم إنشاء روابط للعروض التالية: {', '.join(offer_names)}")
+        logger.info("🤖 البوت يعمل وينتظر روابط AliExpress...")
         self.application.run_polling()
-        logger.info("Bot stopped.")
+        logger.info("تم إيقاف البوت.")
