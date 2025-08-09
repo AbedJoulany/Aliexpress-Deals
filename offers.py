@@ -85,26 +85,3 @@ class StaticOffer(OfferStrategy):
         query = urlencode(self.params)
         raw_url = f"{base_url}?{query}"
         return [_wrap_url_with_star_aliexpress(raw_url)]
-
-
-"""
-super offer
-
-Resolved link: https://star.aliexpress.com/share/share.htm?platform=AE&businessType=ProductDetail&shareId=6000308646916&redirectUrl=https://www.aliexpress.com/item/1005007722296606.html?businessType%3DProductDetail%26shareId%3D6000308646916%26srcSns%3Dsns_Copy%26sourceType%3D562%26spreadType%3DsocialShare%26bizType%3DProductDetail%26social_params%3D6000308646916&aff_fcid=aa58b181aa8b4de6b1ea97cb7bad8cd0-1751208205985-04341-_oFteIuE&tt=CPS_NORMAL&aff_fsk=_oFteIuE&aff_platform=shareComponent-detail&sk=_oFteIuE&aff_trace_key=aa58b181aa8b4de6b1ea97cb7bad8cd0-1751208205985-04341-_oFteIuE&terminal_id=52ae98e8ca6e43c18f55b335cb6ad44b
-
-3D562
-
-coin offer direct page from phone
-
-https://star.aliexpress.com/share/share.htm?platform=AE&businessType=ProductDetail&shareId=6000308069155&redirectUrl=https://www.aliexpress.com/item/1005006731698567.html?businessType%3DProductDetail%26shareId%3D6000308069155%26srcSns%3Dsns_Copy%26sourceType%3D620%26spreadType%3DsocialShare%26bizType%3DProductDetail%26social_params%3D6000308069155&aff_fcid=67b0ce0f818c4c82868aa82c76b49d33-1751209287830-06585-_oENkBKw&tt=CPS_NORMAL&aff_fsk=_oENkBKw&aff_platform=shareComponent-detail&sk=_oENkBKw&aff_trace_key=67b0ce0f818c4c82868aa82c76b49d33-1751209287830-06585-_oENkBKw&terminal_id=373f504a530a45e38907f6ba77f67829
-
-sourceType%3D620
-
-bundles offer direct page from phone
-
-https://star.aliexpress.com/share/share.htm?platform=AE&businessType=ProductDetail&shareId=6000307125756&redirectUrl=https://www.aliexpress.com/item/1005006967262943.html?businessType%3DProductDetail%26shareId%3D6000307125756%26srcSns%3Dsns_Copy%26sourceType%3D570%26spreadType%3DsocialShare%26bizType%3DProductDetail%26social_params%3D6000307125756&aff_fcid=43107736d18645c7b7cee126f086f0d6-1751209814324-08503-_omEfwjY&tt=CPS_NORMAL&aff_fsk=_omEfwjY&aff_platform=shareComponent-detail&sk=_omEfwjY&aff_trace_key=43107736d18645c7b7cee126f086f0d6-1751209814324-08503-_omEfwjY&terminal_id=9923dd2bc3ac4ade9a714c52c6dba834
-
-sourceType%3D570
-
-
-"""

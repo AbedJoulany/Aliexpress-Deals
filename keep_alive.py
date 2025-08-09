@@ -2,16 +2,16 @@
 import os
 from flask import Flask
 import logging
-import threading # Used to run the Flask app in a separate thread
+import threading  # Used to run the Flask app in a separate thread
 
 # Configure logging for this module
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+    level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
 
 @app.route('/')
 def home():
@@ -20,6 +20,7 @@ def home():
     Render will hit this endpoint to confirm the service is alive.
     """
     return "Bot's keep-alive server is running!", 200
+
 
 def run_keep_alive_server():
     """
@@ -32,6 +33,7 @@ def run_keep_alive_server():
     logger.info(f"Starting keep-alive web server on port {port}...")
     # Run the Flask app. debug=False for production.
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 if __name__ == '__main__':
     # This block is for testing keep_alive.py independently
