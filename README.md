@@ -85,7 +85,7 @@ QUERY_COUNTRY=US
 ```bash
 # Activate venv (if not active)
 source venv/bin/activate  # macOS/Linux
-.env\Scriptsctivate   # Windows
+.\venv\Scripts\activate    # Windows
 
 # Run
 python main.py
@@ -241,7 +241,7 @@ QUERY_COUNTRY=US
 ```bash
 # تفعيل البيئة الافتراضية (إذا لم تكن مفعّلة)
 source venv/bin/activate  # على macOS/Linux
-.env\Scriptsctivate   # على Windows
+.\venv\Scripts\activate    # على Windows
 
 # تشغيل البوت
 python main.py
