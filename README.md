@@ -51,7 +51,7 @@ cd Aliexpress-telegram-bot
 # Create a virtual environment
 python -m venv venv
 source venv/bin/activate  # macOS/Linux
-.env\Scriptsctivate   # Windows
+.\venv\Scripts\activate   # Windows
 
 # Install dependencies
 pip install -r requirements.txt
@@ -207,7 +207,7 @@ cd Aliexpress-telegram-bot
 # إنشاء بيئة عمل افتراضية
 python -m venv venv
 source venv/bin/activate  # على macOS/Linux
-.env\Scriptsctivate   # على Windows
+.\env\Scriptsctivate   # على Windows
 
 # تثبيت المتطلبات
 pip install -r requirements.txt
