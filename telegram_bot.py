@@ -1,15 +1,20 @@
 import logging
 import re
+import html
 import asyncio
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, JobQueue
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode, ChatAction
 
 from aliexpress_client import AliExpressClient
+from aliexpress_errors import (
+    AliExpressError, ProductNotFoundError, AuthenticationError,
+    RateLimitError, NetworkError, InvalidResponseError, APIError)
 from url_processor import URLProcessor
 from cache_manager import CacheManager
 from constants import OFFER_PARAMS, OFFER_ORDER
@@ -18,6 +23,8 @@ from aliexpress_utils import get_product_details_by_id  # Added this import as i
 logger = logging.getLogger(__name__)
 # رمز RTL لإجبار النص على الاتجاه من اليمين لليسار
 rtl_mark = "\u200F"
+TELEGRAM_CAPTION_MAX_LENGTH = 1024
+TELEGRAM_TEXT_MAX_LENGTH = 4096
 ARABIC_CURRENCY_NAMES = {
     "USD": "دولار أمريكي",
     "SAR": "ريال سعودي",
@@ -28,6 +35,19 @@ ARABIC_CURRENCY_NAMES = {
     "CNY": "يوان صيني",
     "ILS": "شيكل إسرائيلي",
 }
+
+
+def _safe_html_href(url: str | None) -> str | None:
+    """Escape a URL for use in an HTML href attribute, or reject it."""
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return None
+    return html.escape(url, quote=True)
 
 
 class TelegramBot:
@@ -100,49 +120,77 @@ class TelegramBot:
 
     async def _fetch_product_info(self, product_id: str):
         """Fetches product details from API, with scraping fallback."""
-        product_details = await self.aliexpress_client.fetch_product_details(
-            product_id)
-
-        if product_details:
-            logger.info(
-                f"Successfully fetched details via API for product ID: {product_id}"
-            )
-            return {
-                'image_url': product_details.get('image_url'),
-                'price': product_details.get('price'),
-                'currency': product_details.get('currency', ''),
-                'title': product_details.get('title', f"Product {product_id}"),
-                'source': "API"
-            }
-        else:
-            logger.warning(
-                f"API failed for product ID: {product_id}. Attempting scraping fallback."
-            )
-            try:
-                scraped_name, scraped_image = await asyncio.get_event_loop(
-                ).run_in_executor(
-                    self.executor,
-                    lambda: get_product_details_by_id(product_id))
-                if scraped_name:
-                    logger.info(
-                        f"Successfully scraped details for product ID: {product_id}"
-                    )
-                    return {
-                        'image_url': scraped_image,
-                        'price': None,  # Price not available from scraping
-                        'currency': '',
-                        'title': scraped_name,
-                        'source': "Scraped"
-                    }
-                else:
-                    logger.warning(
-                        f"Scraping also failed for product ID: {product_id}")
-                    return {'source': "None", 'title': f"Product {product_id}"}
-            except Exception as scrape_err:
-                logger.error(
-                    f"Error during scraping fallback for product ID {product_id}: {scrape_err}"
+        try:
+            product_details = await self.aliexpress_client.fetch_product_details(
+                product_id)
+            if product_details:
+                logger.info(
+                    f"Successfully fetched details via API for product ID: {product_id}"
                 )
-                return {'source': "None", 'title': f"Product {product_id}"}
+                return {
+                    'image_url': product_details.get('image_url'),
+                    'price': product_details.get('price'),
+                    'currency': product_details.get('currency', ''),
+                    'title': product_details.get('title', f"Product {product_id}"),
+                    'source': "API"
+                }
+        except AuthenticationError as e:
+            logger.error(
+                f"AliExpress authentication/configuration failure for product ID {product_id}: {e}"
+            )
+            return {'source': "AuthError", 'title': f"Product {product_id}"}
+        except ProductNotFoundError as e:
+            logger.warning(
+                f"Product not found via API for product ID {product_id}: {e}"
+            )
+        except RateLimitError as e:
+            logger.warning(
+                f"AliExpress rate limited for product ID {product_id}: {e}. Attempting scraping fallback."
+            )
+        except NetworkError as e:
+            logger.warning(
+                f"AliExpress network error for product ID {product_id}: {e}. Attempting scraping fallback."
+            )
+        except InvalidResponseError as e:
+            logger.warning(
+                f"Invalid AliExpress API response for product ID {product_id}: {e}. Attempting scraping fallback."
+            )
+        except APIError as e:
+            logger.warning(
+                f"AliExpress API error for product ID {product_id}: {e}. Attempting scraping fallback."
+            )
+        except AliExpressError as e:
+            logger.warning(
+                f"AliExpress error for product ID {product_id}: {e}. Attempting scraping fallback."
+            )
+
+        logger.warning(
+            f"API failed for product ID: {product_id}. Attempting scraping fallback."
+        )
+        try:
+            scraped_name, scraped_image = await asyncio.get_event_loop(
+            ).run_in_executor(
+                self.executor,
+                lambda: get_product_details_by_id(product_id))
+            if scraped_name:
+                logger.info(
+                    f"Successfully scraped details for product ID: {product_id}"
+                )
+                return {
+                    'image_url': scraped_image,
+                    'price': None,  # Price not available from scraping
+                    'currency': '',
+                    'title': scraped_name,
+                    'source': "Scraped"
+                }
+            logger.warning(
+                f"Scraping also failed for product ID: {product_id}")
+            return {'source': "None", 'title': f"Product {product_id}"}
+        except Exception as scrape_err:
+            logger.error(
+                f"Error during scraping fallback for product ID {product_id}: {scrape_err}"
+            )
+            return {'source': "None", 'title': f"Product {product_id}"}
 
     def _generate_offer_urls(self, base_url: str, product_id: str):
         """Builds target URLs for different offer strategies."""
@@ -171,18 +219,19 @@ class TelegramBot:
     def _format_response_message(self, product_info: dict,
                                  generated_links: dict):
         """تهيئة نص الرسالة لإرسالها عبر تيليجرام باللغة العربية."""
-        product_title = product_info.get('title')
+        product_title = html.escape(str(product_info.get('title') or '')[:250])
         product_price = product_info.get('price')
         product_currency = product_info.get('currency')
         details_source = product_info.get('source')
 
         message_lines = []
-        message_lines.append(f"<b>{rtl_mark}{product_title[:250]}</b>")
+        message_lines.append(f"<b>{rtl_mark}{product_title}</b>")
 
         arabic_currency = ARABIC_CURRENCY_NAMES.get(product_currency, product_currency)
+        safe_currency = html.escape(str(arabic_currency or ''))
 
         if details_source == "API" and product_price:
-            price_str = f"{product_price} {arabic_currency}".strip()
+            price_str = f"{html.escape(str(product_price))} {safe_currency}".strip()
             message_lines.append(f"\n<b>السعر بعد الخصم:</b> {price_str}\n")
         elif details_source == "Scraped":
             message_lines.append("\n<b>السعر بعد الخصم:</b> غير متوفر\n")
@@ -193,10 +242,11 @@ class TelegramBot:
 
         for offer_key in OFFER_ORDER:
             link = generated_links.get(offer_key)
-            offer_name = OFFER_PARAMS[offer_key].label
-            if link:
+            offer_name = html.escape(str(OFFER_PARAMS[offer_key].label))
+            safe_href = _safe_html_href(link)
+            if safe_href:
                 message_lines.append(
-                    f'{offer_name}: <a href="{link}">اضغط هنا</a>')
+                    f'{offer_name}: <a href="{safe_href}">اضغط هنا</a>')
             else:
                 message_lines.append(f"{offer_name}: ❌ فشل في الإنشاء")
 
@@ -221,30 +271,51 @@ class TelegramBot:
                                     product_image: str | None,
                                     reply_markup: InlineKeyboardMarkup):
         """Sends the final product message (with or without image)."""
+        text_to_send = response_text
+        if len(text_to_send) > TELEGRAM_TEXT_MAX_LENGTH:
+            text_to_send = text_to_send[:TELEGRAM_TEXT_MAX_LENGTH - 1] + "…"
+        caption_fits = len(text_to_send) <= TELEGRAM_CAPTION_MAX_LENGTH
+
         try:
-            if product_image:
+            if product_image and caption_fits:
                 await self.application.bot.send_photo(
                     chat_id=chat_id,
                     photo=product_image,
-                    caption=response_text,
+                    caption=text_to_send,
                     parse_mode=ParseMode.HTML,
                     reply_markup=reply_markup)
-            else:
+                return
+
+            if product_image and not caption_fits:
+                try:
+                    await self.application.bot.send_photo(
+                        chat_id=chat_id, photo=product_image)
+                except Exception as photo_error:
+                    logger.warning(
+                        f"Failed to send product image for chat {chat_id}: {photo_error}"
+                    )
                 await self.application.bot.send_message(
                     chat_id=chat_id,
-                    text=response_text,
+                    text=text_to_send,
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                     reply_markup=reply_markup)
+                return
+
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=text_to_send,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=reply_markup)
         except Exception as send_error:
             logger.error(
                 f"Failed to send message with keyboard for chat {chat_id}: {send_error}"
             )
-            # Fallback to sending text-only message if photo fails
             await self.application.bot.send_message(
                 chat_id=chat_id,
                 text=
-                f"⚠️ حدث خطأ أثناء إرسال الرسالة. إليك العروض المتوفرة:\n\n{response_text}",
+                f"⚠️ حدث خطأ أثناء إرسال الرسالة. إليك العروض المتوفرة:\n\n{text_to_send}",
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
                 reply_markup=reply_markup)
@@ -259,6 +330,14 @@ class TelegramBot:
         try:
             # Step 1: Fetch Product Info (API or Scraping)
             product_info = await self._fetch_product_info(product_id)
+            if product_info.get('source') == "AuthError":
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=
+                    "⚠️ تعذر الاتصال بخدمة AliExpress حالياً. يرجى المحاولة لاحقاً."
+                )
+                return
+
             product_title = product_info.get('title', f"Product {product_id}")
             product_image = product_info.get('image_url')
 
@@ -339,7 +418,7 @@ class TelegramBot:
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=
-                    f"<b>{product_title[:250]}</b>\n\nلم نتمكن من العثور على عروض لهذا المنتج حاليًا ❌",
+                    f"<b>{html.escape(str(product_title)[:250])}</b>\n\nلم نتمكن من العثور على عروض لهذا المنتج حاليًا ❌",
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                     reply_markup=reply_markup)
