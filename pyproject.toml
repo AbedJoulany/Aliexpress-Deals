@@ -7,8 +7,8 @@ requires-python = ">=3.11"
 dependencies = [
     "aiohttp>=3.12.13",
     "beautifulsoup4>=4.13.4",
-    "iop>=0.0.4",
+    "flask>=3.0.0",
     "python-dotenv>=1.1.0",
+    "python-telegram-bot[ext]>=20.0",
     "requests>=2.32.4",
-    "telegram>=0.0.1",
 ]

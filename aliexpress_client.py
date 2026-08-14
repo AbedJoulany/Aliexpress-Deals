@@ -1,20 +1,31 @@
 import logging
 import json
+import time
 import asyncio
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
-from typing import Union, Dict, List, Tuple
+from typing import Union, Dict, List, Tuple, Callable, TypeVar
 
+import requests
 import iop  # Assuming iop is installed and available
 from cache_manager import CacheManager  # Assuming CacheManager is in cache_manager.py
+from aliexpress_errors import (
+    AliExpressError, ProductNotFoundError, RateLimitError, NetworkError,
+    InvalidResponseError, APIError, classify_api_error)
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.INFO)
+
+T = TypeVar('T')
+MAX_ATTEMPTS = 3
+INITIAL_BACKOFF_SECONDS = 0.5
 
 
 class AliExpressClient:
     ALIEXPRESS_API_URL = 'https://api-sg.aliexpress.com/sync'
     QUERY_FIELDS = 'product_main_image_url,target_sale_price,product_title,target_sale_price_currency'
+    MAX_ATTEMPTS = MAX_ATTEMPTS
+    INITIAL_BACKOFF_SECONDS = INITIAL_BACKOFF_SECONDS
 
     def __init__(self, app_key: str, app_secret: str, tracking_id: str,
                  target_currency: str, target_language: str,
@@ -37,7 +48,124 @@ class AliExpressClient:
             logger.exception(f"Error initializing AliExpress API client: {e}")
             raise
 
-    async def fetch_product_details(self, product_id: str) -> dict | None:
+    def _retry_sync(self, func: Callable[[], T]) -> T:
+        """Retry a blocking call for transient network and rate-limit errors."""
+        delay = self.INITIAL_BACKOFF_SECONDS
+        last_error: AliExpressError | None = None
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            try:
+                return func()
+            except (NetworkError, RateLimitError) as exc:
+                last_error = exc
+                if attempt >= self.MAX_ATTEMPTS:
+                    break
+                logger.warning(
+                    f"Transient AliExpress error (attempt {attempt}/{self.MAX_ATTEMPTS}): {exc}. "
+                    f"Retrying in {delay}s")
+                time.sleep(delay)
+                delay *= 2
+        raise last_error or NetworkError("AliExpress request failed")
+
+    def _execute_iop_request(self, request):
+        """Execute an IOP request and map transport failures to typed errors."""
+        try:
+            return self.client.execute(request)
+        except (requests.RequestException, TimeoutError, OSError) as e:
+            raise NetworkError(str(e)) from e
+        except AliExpressError:
+            raise
+        except Exception as e:
+            raise APIError(str(e)) from e
+
+    def _response_body_as_dict(self, response) -> dict:
+        if not response or not getattr(response, 'body', None):
+            raise InvalidResponseError("Empty AliExpress API response")
+
+        response_data = response.body
+        if isinstance(response_data, str):
+            try:
+                response_data = json.loads(response_data)
+            except json.JSONDecodeError as json_err:
+                raise InvalidResponseError(
+                    f"Failed to decode JSON response: {json_err}") from json_err
+
+        if not isinstance(response_data, dict):
+            raise InvalidResponseError("API response is not a JSON object")
+        return response_data
+
+    def _raise_if_error_response(self, response_data: dict) -> None:
+        if 'error_response' not in response_data:
+            return
+        error_details = response_data.get('error_response', {}) or {}
+        raise classify_api_error(error_details.get('code', 'N/A'),
+                                 error_details.get('msg', 'Unknown API error'))
+
+    def _execute_product_detail_request(self, product_id: str):
+        request = iop.IopRequest('aliexpress.affiliate.productdetail.get')
+        request.add_api_param('fields', self.QUERY_FIELDS)
+        request.add_api_param('product_ids', product_id)
+        request.add_api_param('target_currency', self.target_currency)
+        request.add_api_param('target_language', self.target_language)
+        request.add_api_param('tracking_id', self.tracking_id)
+        request.add_api_param('country', self.query_country)
+        return self._execute_iop_request(request)
+
+    def _parse_product_response(self, response, product_id: str) -> dict:
+        try:
+            response_data = self._response_body_as_dict(response)
+            self._raise_if_error_response(response_data)
+
+            detail_response = response_data.get(
+                'aliexpress_affiliate_productdetail_get_response')
+            if not detail_response:
+                raise InvalidResponseError(
+                    f"Missing product detail response key for ID {product_id}")
+
+            resp_result = detail_response.get('resp_result')
+            if not resp_result:
+                raise InvalidResponseError(
+                    f"Missing resp_result for ID {product_id}")
+
+            resp_code = resp_result.get('resp_code')
+            if resp_code != 200:
+                resp_msg = resp_result.get('resp_msg', 'Unknown response message')
+                classified = classify_api_error(resp_code, resp_msg)
+                if resp_code in (404, '404') or isinstance(
+                        classified, ProductNotFoundError):
+                    raise ProductNotFoundError(
+                        resp_msg or f"Product {product_id} not found")
+                raise classified
+
+            result = resp_result.get('result', {}) or {}
+            products = result.get('products', {}).get('product', [])
+
+            if not products:
+                raise ProductNotFoundError(
+                    f"No products found in API response for ID {product_id}")
+
+            product_data = products[0]
+            return {
+                'image_url': product_data.get('product_main_image_url'),
+                'price': product_data.get('target_sale_price'),
+                'currency': product_data.get('target_sale_price_currency',
+                                             self.target_currency),
+                'title': product_data.get('product_title',
+                                          f'Product {product_id}')
+            }
+        except AliExpressError:
+            raise
+        except (TypeError, AttributeError, KeyError, IndexError) as e:
+            raise InvalidResponseError(
+                f"Unexpected product API data for ID {product_id}") from e
+
+    def _fetch_product_details_sync(self, product_id: str) -> dict:
+        def _once():
+            response = self._execute_product_detail_request(product_id)
+            return self._parse_product_response(response, product_id)
+
+        return self._retry_sync(_once)
+
+    async def fetch_product_details(self, product_id: str) -> dict:
         """Fetches product details using aliexpress.affiliate.productdetail.get with async cache."""
         cached_data = await self.cache_manager.product_cache.get(product_id)
         if cached_data:
@@ -45,116 +173,17 @@ class AliExpressClient:
             return cached_data
 
         logger.info(f"Fetching product details for ID: {product_id}")
-
-        def _execute_api_call():
-            """Execute blocking API call in a thread pool."""
-            try:
-                request = iop.IopRequest(
-                    'aliexpress.affiliate.productdetail.get')
-                request.add_api_param('fields', self.QUERY_FIELDS)
-                request.add_api_param('product_ids', product_id)
-                request.add_api_param('target_currency', self.target_currency)
-                request.add_api_param('target_language', self.target_language)
-                request.add_api_param('tracking_id', self.tracking_id)
-                request.add_api_param('country', self.query_country)
-                return self.client.execute(request)
-            except Exception as e:
-                logger.error(
-                    f"Error in API call thread for product {product_id}: {e}")
-                return None
-
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(self.executor, _execute_api_call)
+        product_info = await loop.run_in_executor(
+            self.executor, self._fetch_product_details_sync, product_id)
 
-        if not response or not response.body:
-            logger.error(
-                f"Product detail API call failed or returned empty body for ID: {product_id}"
-            )
-            return None
-
-        try:
-            response_data = response.body
-            if isinstance(response_data, str):
-                try:
-                    response_data = json.loads(response_data)
-                except json.JSONDecodeError as json_err:
-                    logger.error(
-                        f"Failed to decode JSON response for product {product_id}: {json_err}. Response: {response_data[:500]}"
-                    )
-                    return None
-
-            if 'error_response' in response_data:
-                error_details = response_data.get('error_response', {})
-                error_msg = error_details.get('msg', 'Unknown API error')
-                error_code = error_details.get('code', 'N/A')
-                logger.error(
-                    f"API Error for Product ID {product_id}: Code={error_code}, Msg={error_msg}"
-                )
-                return None
-
-            detail_response = response_data.get(
-                'aliexpress_affiliate_productdetail_get_response')
-            if not detail_response:
-                logger.error(
-                    f"Missing 'aliexpress_affiliate_productdetail_get_response' key for ID {product_id}. Response: {response_data}"
-                )
-                return None
-
-            resp_result = detail_response.get('resp_result')
-            if not resp_result:
-                logger.error(
-                    f"Missing 'resp_result' key for ID {product_id}. Response: {detail_response}"
-                )
-                return None
-
-            resp_code = resp_result.get('resp_code')
-            if resp_code != 200:
-                resp_msg = resp_result.get('resp_msg',
-                                           'Unknown response message')
-                logger.error(
-                    f"API response code not 200 for ID {product_id}. Code: {resp_code}, Msg: {resp_msg}"
-                )
-                return None
-
-            result = resp_result.get('result', {})
-            products = result.get('products', {}).get('product', [])
-
-            if not products:
-                logger.warning(
-                    f"No products found in API response for ID {product_id}")
-                return None
-
-            product_data = products[0]
-
-            product_info = {
-                'image_url':
-                product_data.get('product_main_image_url'),
-                'price':
-                product_data.get('target_sale_price'),
-                'currency':
-                product_data.get('target_sale_price_currency',
-                                 self.target_currency),
-                'title':
-                product_data.get('product_title', f'Product {product_id}')
-            }
-
-            await self.cache_manager.product_cache.set(product_id,
-                                                       product_info)
-            expiry_date = datetime.now() + timedelta(
-                seconds=self.cache_manager.cache_expiry_seconds)
-            logger.info(
-                f"Cached product {product_id} until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-
-            return product_info
-
-        except Exception as e:
-            logger.exception(
-                f"Error parsing product details response for ID {product_id}: {e}"
-            )
-            return None
-
-    # --- New Helper Methods for generate_affiliate_links_batch ---
+        await self.cache_manager.product_cache.set(product_id, product_info)
+        expiry_date = datetime.now() + timedelta(
+            seconds=self.cache_manager.cache_expiry_seconds)
+        logger.info(
+            f"Cached product {product_id} until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        return product_info
 
     async def _check_cache_for_links(
         self, target_urls: List[str]
@@ -171,7 +200,6 @@ class AliExpressClient:
         uncached_urls: List[str] = []
 
         for url in target_urls:
-            #full_affiliate_link_as_key = f"https://star.aliexpress.com/share/share.htm?&redirectUrl={url}"
             cached_link = await self.cache_manager.link_cache.get(url)
             if cached_link:
                 logger.info(f"Cache hit for affiliate link: {url}")
@@ -185,23 +213,11 @@ class AliExpressClient:
     def _prepare_api_source_values(self, uncached_urls: List[str]) -> str:
         """
         Prepares the source_values string for the AliExpress batch link API.
-        Adds the required 'star.aliexpress.com/share' prefix if missing.
 
         Returns:
             A comma-separated string of prepared URLs.
         """
-        prefixed_urls = []
-        for url in uncached_urls:
-            """
-            if "star.aliexpress.com/share/share.htm" not in url:
-                prefixed_urls.append(
-                    f"https://star.aliexpress.com/share/share.htm?&redirectUrl={url}"
-                )
-            else:
-                prefixed_urls.append(url)
-            """
-            prefixed_urls.append(url)
-        return ",".join(prefixed_urls)
+        return ",".join(uncached_urls)
 
     def _execute_batch_link_api_call(self, source_values_str: str):
         """
@@ -211,100 +227,74 @@ class AliExpressClient:
             source_values_str: Comma-separated string of URLs for the API.
 
         Returns:
-            The raw response from the IOP client, or None if an error occurred.
+            The raw response from the IOP client.
         """
-        try:
-            request = iop.IopRequest('aliexpress.affiliate.link.generate')
-            request.add_api_param('promotion_link_type', '0')
-            request.add_api_param('source_values', source_values_str)
-            request.add_api_param('tracking_id', self.tracking_id)
-            return self.client.execute(request)
-        except Exception as e:
-            logger.error(f"Error in batch link API call thread for URLs: {e}",
-                         exc_info=True)
-            return None
+        request = iop.IopRequest('aliexpress.affiliate.link.generate')
+        request.add_api_param('promotion_link_type', '0')
+        request.add_api_param('source_values', source_values_str)
+        request.add_api_param('tracking_id', self.tracking_id)
+        return self._execute_iop_request(request)
 
     def _parse_api_promotion_response(
             self, response_body: Union[str, Dict, None]) -> List[Dict]:
         """
         Parses the nested JSON response from the batch link generation API.
 
-        Args:
-            response_body: The raw response body (can be string or dict).
-
         Returns:
-            A list of dictionaries, each containing 'source_value' and 'promotion_link',
-            or an empty list if parsing fails or no links are found.
+            A list of dictionaries, each containing 'source_value' and 'promotion_link'.
         """
-        if not response_body:
-            logger.error("Empty response body for batch link generation.")
-            return []
+        class _BodyResponse:
+            def __init__(self, body):
+                self.body = body
+                self.code = None
+                self.message = None
 
-        response_data = response_body
-        if isinstance(response_data, str):
-            try:
-                response_data = json.loads(response_data)
-            except json.JSONDecodeError as json_err:
-                logger.error(
-                    f"Failed to decode JSON response for batch link generation: {json_err}. Response: {response_data[:500]}"
-                )
-                return []
-
-        if 'error_response' in response_data:
-            error_details = response_data.get('error_response', {})
-            error_msg = error_details.get('msg', 'Unknown API error')
-            error_code = error_details.get('code', 'N/A')
-            logger.error(
-                f"API Error for Batch Link Generation: Code={error_code}, Msg={error_msg}"
-            )
-            return []
+        response_data = self._response_body_as_dict(
+            _BodyResponse(response_body))
+        self._raise_if_error_response(response_data)
 
         generate_response = response_data.get(
             'aliexpress_affiliate_link_generate_response')
         if not generate_response:
-            logger.error(
-                f"Missing 'aliexpress_affiliate_link_generate_response' key in batch response. Response: {response_data}"
-            )
-            return []
+            raise InvalidResponseError(
+                "Missing aliexpress_affiliate_link_generate_response key")
 
         resp_result_outer = generate_response.get('resp_result')
         if not resp_result_outer:
-            logger.error(
-                f"Missing 'resp_result' key in batch response. Response: {generate_response}"
-            )
-            return []
+            raise InvalidResponseError(
+                "Missing resp_result key in batch link response")
 
         resp_code = resp_result_outer.get('resp_code')
         if resp_code != 200:
             resp_msg = resp_result_outer.get('resp_msg',
                                              'Unknown response message')
-            logger.error(
-                f"API response code not 200 for batch link generation. Code: {resp_code}, Msg: {resp_msg}"
-            )
-            return []
+            raise classify_api_error(resp_code, resp_msg)
 
         result = resp_result_outer.get('result', {})
         if not result:
-            logger.error(
-                f"Missing 'result' key in batch link response. Response: {resp_result_outer}"
-            )
-            return []
+            raise InvalidResponseError(
+                "Missing result key in batch link response")
 
         links_data = result.get('promotion_links',
                                 {}).get('promotion_link', [])
         if not links_data or not isinstance(links_data, list):
             logger.warning(
-                f"No 'promotion_links' found or not a list in batch response. Response: {result}"
-            )
+                "No 'promotion_links' found or not a list in batch response.")
             return []
 
         logger.info(f"Batch API response contains {len(links_data)} links.")
-
-        # Filter out non-dict items for robustness
         return [
             link_info for link_info in links_data
             if isinstance(link_info, dict)
         ]
+
+    def _fetch_batch_links_sync(self, source_values_str: str) -> List[Dict]:
+        def _once():
+            raw_response = self._execute_batch_link_api_call(source_values_str)
+            return self._parse_api_promotion_response(
+                raw_response.body if raw_response else None)
+
+        return self._retry_sync(_once)
 
     async def _update_results_and_cache(self, results_dict: Dict[str,
                                                                  Union[str,
@@ -325,7 +315,6 @@ class AliExpressClient:
             promo_link = link_info.get('promotion_link')
 
             if source_url and promo_link:
-                # Only update if the source_url was originally requested and uncached
                 if source_url in results_dict:
                     results_dict[source_url] = promo_link
                     await self.cache_manager.link_cache.set(
@@ -342,15 +331,11 @@ class AliExpressClient:
                     f"Incomplete promotion link data item in batch response: {link_info}"
                 )
 
-
-# Log any URLs that were in uncached_urls but still don't have an affiliate link
         for url in uncached_urls:
             if results_dict.get(url) is None:
                 logger.warning(
                     f"No affiliate link returned or processed for requested URL: {url}"
                 )
-
-    # --- Main generate_affiliate_links_batch Function ---
 
     async def generate_affiliate_links_batch(
             self, target_urls: List[str]) -> Dict[str, Union[str, None]]:
@@ -359,7 +344,6 @@ class AliExpressClient:
         Checks cache first, then fetches missing links in a batch.
         Returns a dictionary mapping each original target_url to its affiliate link (or None if failed).
         """
-        # 1. Check cache for existing links
         results_dict, uncached_urls = await self._check_cache_for_links(
             target_urls)
 
@@ -371,21 +355,15 @@ class AliExpressClient:
             f"Generating affiliate links for {len(uncached_urls)} uncached URLs: {', '.join(uncached_urls[:3])}...\n"
         )
 
-        # 2. Prepare URLs for API call
         source_values_str = self._prepare_api_source_values(uncached_urls)
-
-        # 3. Execute the batch API call in a thread pool
         loop = asyncio.get_event_loop()
-        raw_response = await loop.run_in_executor(
-            self.executor, self._execute_batch_link_api_call,
-            source_values_str)
+        try:
+            api_links_data = await loop.run_in_executor(
+                self.executor, self._fetch_batch_links_sync, source_values_str)
+        except AliExpressError as e:
+            logger.error(f"Batch affiliate link generation failed: {e}")
+            api_links_data = []
 
-        # 4. Parse the API response
-        api_links_data = self._parse_api_promotion_response(
-            raw_response.body if raw_response else None)
-
-        # 5. Update results_dict and cache new links
         await self._update_results_and_cache(results_dict, uncached_urls,
                                              api_links_data)
-
         return results_dict

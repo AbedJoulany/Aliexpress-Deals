@@ -3,11 +3,51 @@ import re
 import logging
 import asyncio
 import aiohttp
-from urllib.parse import urlparse, urlunparse, urlencode, parse_qs  # Import parse_qs
+from urllib.parse import urlparse, urlunparse, urlencode, parse_qs
 
 from cache_manager import CacheManager
+from offers import _wrap_url_with_star_aliexpress
 
 logger = logging.getLogger(__name__)
+
+MAX_REDIRECTS = 5
+_ALIEXPRESS_BASE_DOMAINS = (
+    'aliexpress.com',
+    'aliexpress.ru',
+    'aliexpress.es',
+    'aliexpress.fr',
+    'aliexpress.pt',
+    'aliexpress.it',
+    'aliexpress.pl',
+    'aliexpress.nl',
+    'aliexpress.co.kr',
+    'aliexpress.co.jp',
+    'aliexpress.com.br',
+    'aliexpress.com.tr',
+    'aliexpress.com.vn',
+    'aliexpress.us',
+    'aliexpress.id',
+    'aliexpress.th',
+    'aliexpress.ar',
+)
+
+
+def is_aliexpress_host(host: str | None) -> bool:
+    """Return True if host is an AliExpress domain or subdomain."""
+    if not host:
+        return False
+    normalized = host.lower().rstrip('.')
+    for base in _ALIEXPRESS_BASE_DOMAINS:
+        if normalized == base or normalized.endswith('.' + base):
+            return True
+    return False
+
+
+def force_https(url: str) -> str:
+    """Upgrade an http URL to https without otherwise changing it."""
+    if url.startswith('http://'):
+        return 'https://' + url[7:]
+    return url
 
 
 class URLProcessor:
@@ -21,10 +61,60 @@ class URLProcessor:
     SHORT_LINK_DOMAIN_REGEX = re.compile(
         r'https?://(?:s\.click\.aliexpress\.com/e/|a\.aliexpress\.com/_)[a-zA-Z0-9_-]+/?',
         re.IGNORECASE)
+    MAX_REDIRECTS = MAX_REDIRECTS
 
     def __init__(self, query_country: str, cache_manager: CacheManager):
         self.query_country = query_country
         self.cache_manager = cache_manager
+
+    def _hostname(self, url: str) -> str | None:
+        try:
+            host = urlparse(url).hostname
+        except ValueError:
+            return None
+        if not host:
+            return None
+        return host.lower().rstrip('.')
+
+    def _redirect_chain_is_safe(self, response) -> bool:
+        """Reject redirect chains that leave AliExpress hosts."""
+        hops = list(getattr(response, 'history', ()) or ())
+        hop_urls = [str(hop.url) for hop in hops if getattr(hop, 'url', None)]
+        hop_urls.append(str(response.url) if response.url else '')
+        for hop_url in hop_urls:
+            scheme = urlparse(hop_url).scheme.lower()
+            if scheme not in ('http', 'https'):
+                logger.warning(
+                    f"Rejecting redirect hop with unexpected scheme: {hop_url}"
+                )
+                return False
+            if not is_aliexpress_host(self._hostname(hop_url)):
+                logger.warning(
+                    f"Rejecting redirect hop to non-AliExpress host: {hop_url}"
+                )
+                return False
+        return True
+
+    def _is_safe_product_destination(self, url: str) -> bool:
+        if not url:
+            return False
+        parsed = urlparse(url)
+        if parsed.scheme != 'https':
+            return False
+        if not is_aliexpress_host(parsed.hostname):
+            return False
+        return True
+
+    def _fetch_following_redirects(self, url: str,
+                                   session: aiohttp.ClientSession):
+        timeout = aiohttp.ClientTimeout(total=10)
+        return session.get(
+            url,
+            allow_redirects=True,
+            max_redirects=self.MAX_REDIRECTS,
+            timeout=timeout,
+            ssl=True,
+        )
 
     async def resolve_short_link(self, short_url: str,
                                  session: aiohttp.ClientSession) -> str | None:
@@ -32,17 +122,37 @@ class URLProcessor:
         cached_final_url = await self.cache_manager.resolved_url_cache.get(
             short_url)
         if cached_final_url:
-            logger.debug(
-                f"Cache hit for resolved short link: {short_url} -> {cached_final_url}"
+            cached_final_url = force_https(cached_final_url)
+            if self._is_safe_product_destination(cached_final_url):
+                logger.debug(
+                    f"Cache hit for resolved short link: {short_url} -> {cached_final_url}"
+                )
+                return cached_final_url
+            logger.warning(
+                f"Ignoring cached short-link destination that is no longer allowed: {cached_final_url}"
             )
-            return cached_final_url
+
+        request_url = force_https(short_url)
+        if urlparse(request_url).scheme != 'https':
+            logger.warning(
+                f"Refusing to resolve short link with non-HTTPS scheme: {short_url}"
+            )
+            return None
+        if not is_aliexpress_host(self._hostname(request_url)):
+            logger.warning(
+                f"Refusing to resolve non-AliExpress short link host: {short_url}"
+            )
+            return None
 
         logger.debug(f"Resolving short link: {short_url}")
         try:
-            async with session.get(short_url, allow_redirects=True,
-                                   timeout=10) as response:
+            async with self._fetch_following_redirects(
+                    request_url, session) as response:
                 if response.status == 200 and response.url:
-                    final_url = str(response.url)
+                    if not self._redirect_chain_is_safe(response):
+                        return None
+
+                    final_url = force_https(str(response.url))
                     logger.info(f"Resolved {short_url} to {final_url}")
 
                     if '.aliexpress.us' in final_url:
@@ -64,25 +174,33 @@ class URLProcessor:
                             f"Updated URL with correct country: {final_url}")
 
                         try:
-                            logger.debug(
-                                f"Re-fetching URL with updated country parameter: {final_url}"
-                            )
-                            async with session.get(
-                                    final_url, allow_redirects=True,
-                                    timeout=10) as country_response:
-                                if country_response.status == 200 and country_response.url:
-                                    final_url = str(country_response.url)
-                                    logger.info(
-                                        f"Re-fetched URL with correct country: {final_url}"
-                                    )
+                            country_url = force_https(final_url)
+                            if is_aliexpress_host(self._hostname(country_url)):
+                                logger.debug(
+                                    f"Re-fetching URL with updated country parameter: {country_url}"
+                                )
+                                async with self._fetch_following_redirects(
+                                        country_url,
+                                        session) as country_response:
+                                    if (country_response.status == 200
+                                            and country_response.url
+                                            and self._redirect_chain_is_safe(
+                                                country_response)):
+                                        final_url = force_https(
+                                            str(country_response.url))
+                                        logger.info(
+                                            f"Re-fetched URL with correct country: {final_url}"
+                                        )
                         except Exception as e:
                             logger.warning(
                                 f"Error re-fetching URL with updated country parameter: {e}"
                             )
 
+                    final_url = force_https(final_url)
                     product_id = self.extract_product_id(final_url)
-                    if self.STANDARD_ALIEXPRESS_DOMAIN_REGEX.match(
-                            final_url) and product_id:
+                    if (self._is_safe_product_destination(final_url)
+                            and self.STANDARD_ALIEXPRESS_DOMAIN_REGEX.match(
+                                final_url) and product_id):
                         await self.cache_manager.resolved_url_cache.set(
                             short_url, final_url)
                         return final_url
@@ -98,6 +216,10 @@ class URLProcessor:
                     return None
         except asyncio.TimeoutError:
             logger.error(f"Timeout resolving short link: {short_url}")
+            return None
+        except aiohttp.TooManyRedirects:
+            logger.error(
+                f"Too many redirects resolving short link: {short_url}")
             return None
         except aiohttp.ClientError as e:
             logger.error(
@@ -193,8 +315,7 @@ class URLProcessor:
             reconstructed_url = urlunparse(
                 (parsed_url.scheme, netloc, parsed_url.path, '',
                  new_query_string, ''))
-            reconstructed_url = f"https://star.aliexpress.com/share/share.htm?&redirectUrl={reconstructed_url}"
-            return reconstructed_url
+            return _wrap_url_with_star_aliexpress(reconstructed_url)
         except ValueError:
             logger.error(
                 f"Error building URL with params for base: {base_url}")

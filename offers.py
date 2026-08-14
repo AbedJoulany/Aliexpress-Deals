@@ -1,11 +1,15 @@
 # offers.py
 from abc import ABC, abstractmethod
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 
 def _wrap_url_with_star_aliexpress(url: str) -> str:
     """Wraps a URL with the star.aliexpress.com affiliate sharing prefix."""
-    return f"https://star.aliexpress.com/share/share.htm?&redirectUrl={url}"
+    encoded_url = quote(url, safe='')
+    return (
+        "https://star.aliexpress.com/share/share.htm"
+        f"?&redirectUrl={encoded_url}"
+    )
 
 
 class OfferStrategy(ABC):
