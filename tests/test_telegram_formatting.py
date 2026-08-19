@@ -2,8 +2,10 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aliexpress_client import AliExpressClient
-from telegram_bot import (
-    TELEGRAM_CAPTION_MAX_LENGTH, TelegramBot, _safe_html_href)
+from message_formatter import (
+    TELEGRAM_CAPTION_MAX_LENGTH, format_product_message, safe_html_href)
+from product_service import ProductService
+from telegram_bot import TelegramBot
 
 
 def _make_bot():
@@ -12,18 +14,14 @@ def _make_bot():
         mock_app.builder.return_value.token.return_value.build.return_value = built
         bot = TelegramBot(
             token='123:ABC',
-            aliexpress_client=MagicMock(),
+            product_service=MagicMock(),
             url_processor=MagicMock(),
-            cache_manager=MagicMock(),
-            executor=MagicMock())
+            cache_manager=MagicMock())
         bot.application = built
         return bot
 
 
 class TelegramFormattingTests(unittest.TestCase):
-
-    def setUp(self):
-        self.bot = _make_bot()
 
     def _format(self, title, price='9.99', currency='USD', link=None):
         product_info = {
@@ -37,7 +35,7 @@ class TelegramFormattingTests(unittest.TestCase):
             from constants import OFFER_ORDER
             for key in OFFER_ORDER:
                 generated_links[key] = link
-        return self.bot._format_response_message(product_info, generated_links)
+        return format_product_message(product_info, generated_links)
 
     def test_normal_product_title(self):
         text = self._format('Wireless earbuds')
@@ -80,7 +78,7 @@ class TelegramFormattingTests(unittest.TestCase):
                          text)
 
     def test_javascript_url_is_rejected(self):
-        self.assertIsNone(_safe_html_href('javascript:alert(1)'))
+        self.assertIsNone(safe_html_href('javascript:alert(1)'))
         text = self._format('Title', link='javascript:alert(1)')
         self.assertNotIn('javascript:', text)
         self.assertIn('فشل في الإنشاء', text)
@@ -127,7 +125,6 @@ class TelegramCaptionLengthTests(unittest.IsolatedAsyncioTestCase):
 class MalformedProductFallbackTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_malformed_product_api_data_uses_scraping_fallback(self):
-        bot = _make_bot()
         with patch('aliexpress_client.iop.IopClient'):
             parser = AliExpressClient(
                 app_key='key',
@@ -155,13 +152,13 @@ class MalformedProductFallbackTests(unittest.IsolatedAsyncioTestCase):
             return parser._parse_product_response(malformed_response,
                                                   product_id)
 
-        bot.aliexpress_client.fetch_product_details = fetch_malformed
-        bot.executor = None
+        parser.fetch_product_details = fetch_malformed
+        service = ProductService(parser, executor=None)
 
-        with patch('telegram_bot.get_product_details_by_id',
+        with patch('product_service.get_product_details_by_id',
                    return_value=('Scraped Title',
                                  'https://example.com/img.jpg')) as scrape:
-            result = await bot._fetch_product_info('123')
+            result = await service.get_product('123')
 
         scrape.assert_called_once_with('123')
         self.assertEqual(result['source'], 'Scraped')
