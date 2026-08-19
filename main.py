@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from cache_manager import CacheManager
 from aliexpress_client import AliExpressClient
 from url_processor import URLProcessor
+from product_service import ProductService
 from telegram_bot import TelegramBot
 import threading # Used to run the Flask app in a separate thread
 from keep_alive import run_keep_alive_server # Import the function from your new file
@@ -58,12 +59,12 @@ def main() -> None:
             cache_manager=cache_manager)
         url_processor = URLProcessor(query_country=query_country,
                                      cache_manager=cache_manager)
+        product_service = ProductService(aliexpress_client, executor)
 
         telegram_bot = TelegramBot(token=telegram_bot_token,
-                                   aliexpress_client=aliexpress_client,
+                                   product_service=product_service,
                                    url_processor=url_processor,
-                                   cache_manager=cache_manager,
-                                   executor=executor)
+                                   cache_manager=cache_manager)
         keep_alive_thread = threading.Thread(target=run_keep_alive_server, daemon=True)
         keep_alive_thread.start()
         logger.info("Keep-alive server thread started.")
